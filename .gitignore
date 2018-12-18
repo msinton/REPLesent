@@ -33,3 +33,6 @@ tmp/
 # Windows
 Desktop.ini
 Thumbs.db
+
+# intellij
+.idea/
