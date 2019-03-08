@@ -77,7 +77,7 @@ case class REPLesent(
 
   private val config = Config(width = width, height = height)
 
-  private case class Line(content: String, length: Int, style: Line.Style, raw: String) {
+  private case class Line(content: String, length: Int, private val style: Line.Style) {
     override def toString: String = content
     def isEmpty: Boolean = content.isEmpty
     def render(margin: Int): String = style(this, margin)
@@ -98,28 +98,11 @@ case class REPLesent(
       def apply(line: Line, margin: Int): String
     }
 
-    private def splitAtWithoutBreakingWords(str: String, n: Int): (String, String) = {
-      val wordBreakOffset = str.take(n).reverseIterator.indexWhere(_.isWhitespace)
-      if (wordBreakOffset == -1) str.splitAt(n) else str.splitAt(n - wordBreakOffset)
-    }
-
-    def split(line: Line, maxLength: Int): List[Line] = {
-      def loop(raw: String, acc: List[Line]): List[Line] = {
-        if (raw.length <= maxLength)
-          acc :+ Line(raw, line.style)
-        else {
-          val (first, next) = splitAtWithoutBreakingWords(raw, maxLength)
-          loop(next, acc :+ Line(first, line.style))
-        }
-      }
-      loop(line.raw, List())
-    }
-
     private object HorizontalRuler extends Style {
       private val ansiBegin = RESET.head
       private val ansiEnd = RESET.last
 
-      private val defaultPattern = Line("-")
+      private val defaultPattern = Line.single("-")
 
       def apply(line: Line, margin: Int): String = {
         // Provides a default pattern if none was specified
@@ -151,7 +134,7 @@ case class REPLesent(
         val left = margin / 2
         val right = margin - left
 
-        val l = Line(content + padding + reset, width, LeftAligned, content)
+        val l = Line(content + padding + reset, width, LeftAligned)
 
         fill(l, left, right)
       }
@@ -290,18 +273,51 @@ case class REPLesent(
       val (content, emojiDrop) = emoji(l2)
 
       val length = l1.codePointCount(0, l1.length) - ansiDrop - emojiDrop
+//      if (length != l2.codePointCount(0, l2.length) || length != content.codePointCount(0, content.length)) {
+//        println("------------ not same ------")
+//        println(content)
+//        println("----")
+//        println(length, l2.codePointCount(0, l2.length), content.codePointCount(0, content.length))
+//        println(ansiDrop, emojiDrop)
+//      }
 
-      Line(content = content, length = length, style = lineStyle, raw)
+      Line(content = content, length = length, style = lineStyle)
     }
 
-    def apply(line: String): Line = {
+
+    private def splitAtWithoutBreakingWords(str: String, n: Int): (String, String) = {
+      val wordBreakOffset = str.take(n).reverseIterator.indexWhere(_.isWhitespace)
+      if (wordBreakOffset == -1) str.splitAt(n) else str.splitAt(n - wordBreakOffset)
+    }
+
+    def single(line: String): Line = {
       val (l1, lineStyle) = style(line)
       val (l2, ansiDrop) = ansi(l1)
       val (content, emojiDrop) = emoji(l2)
-
       val length = l1.codePointCount(0, l1.length) - ansiDrop - emojiDrop
 
-      Line(content = content, length = length, style = lineStyle, raw = line)
+      Line(content = content, length = length, style = lineStyle)
+    }
+
+    def apply(line: String, maxLength: Int = 200): Seq[Line] = {
+
+      // write content length as a list like (1,2,3,3,3,4,5) where the 3s are
+      // the result of a drop. Then can find last where <= maxLength and is whitespace and split there
+      // the only problem with this is the work to do with regex - changing to indexOf etc
+      // alternatively, do the
+
+      val (l1, lineStyle) = style(line)
+
+      def loop(raw: String, acc: List[Line]): List[Line] = {
+        if (raw.length <= maxLength)
+          acc :+ Line(raw, lineStyle)
+        else {
+          val (first, next) = splitAtWithoutBreakingWords(raw, maxLength)
+          loop(next, acc :+ Line(first, lineStyle))
+        }
+      }
+
+      loop(l1, List())
     }
   }
 
@@ -333,7 +349,7 @@ case class REPLesent(
         sb ++= " "
       }
 
-      Line(sb.mkString)
+      Line.single(sb.mkString)
     }
 
     private def select(slide: Int = slideCursor, build: Int = 0): Option[Build] = {
@@ -429,12 +445,12 @@ case class REPLesent(
   private def parse(lines: Iterator[String]): IndexedSeq[Slide] = {
     sealed trait LineHandler {
       def switch: LineHandler
-      def apply(line: String): (Line, Option[String])
+      def apply(line: String, maxLength: Int): (Seq[Line], Option[String])
     }
 
     object LineHandler extends LineHandler {
       def switch: LineHandler = CodeHandler
-      def apply(line: String): (Line, Option[String]) = (Line(line), None)
+      def apply(line: String, maxLength: Int): (Seq[Line], Option[String]) = (Line(line, maxLength), None)
     }
 
     object CodeHandler extends LineHandler {
@@ -479,7 +495,7 @@ case class REPLesent(
 
       def switch: LineHandler = LineHandler
 
-      def apply(line: String): (Line, Option[String]) = {
+      def apply(line: String, maxLength: Int): (Seq[Line], Option[String]) = {
         val (colors, regexes) = patterns.unzip
 
         // new Regex("(?:(a)|(b)|(c))") will produce
@@ -495,7 +511,7 @@ case class REPLesent(
             .getOrElse(line)
         })
 
-        (Line("< " + formatted), Option(line))
+        (Line("< " + formatted, maxLength), Option(line))
       }
     }
 
@@ -515,11 +531,11 @@ case class REPLesent(
       def switchHandler: Acc = copy(handler = handler.switch)
 
       def append(line: String): Acc = {
-        val (l, c) = handler(line)
-        if (l.length > maxLength)
-          copy(content = content ++ Line.split(l, maxLength), codeAcc = c.fold(codeAcc)(codeAcc :+ _))
-        else
-          copy(content = content :+ l, codeAcc = c.fold(codeAcc)(codeAcc :+ _))
+        val (lines, c) = handler(line, maxLength)
+//        if (l.length > maxLength)
+        copy(content = content ++ lines, codeAcc = c.fold(codeAcc)(codeAcc :+ _))
+//        else
+//          copy(content = content :+ l, codeAcc = c.fold(codeAcc)(codeAcc :+ _))
       }
 
       def pushBuild: Acc = copy(
